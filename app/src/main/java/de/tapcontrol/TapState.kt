@@ -12,6 +12,7 @@ object TapState {
     private const val PREFS = "settings"
     const val KEY_THRESHOLD = "threshold"
     const val KEY_VIBRATE = "vibrate"
+    const val KEY_SCREEN_OFF_ONLY = "screen_off_only"
 
     fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }

@@ -32,6 +32,8 @@ class TapDetector(
     private val maxGapMs: Long = 500,
     private val maxPeakMs: Long = 70,
     private val cooldownMs: Long = 800,
+    /** Nach dem (Neu-)Start so lange nichts auswerten, z. B. Hinlegen direkt nach dem Sperren. */
+    private val startupMs: Long = 1000,
     /** So lange wird nach dem letzten Klopfer noch auf Kippen/Anheben geprüft, bevor die Geste auslöst. */
     private val settleMs: Long = 700,
     private val maxTiltDeg: Float = 10f,
@@ -85,6 +87,7 @@ class TapDetector(
             gravity[0] = x; gravity[1] = y; gravity[2] = z
             lastSampleNs = timestampNs
             initialized = true
+            cooldownUntilNs = timestampNs + startupMs * MS
             return
         }
 

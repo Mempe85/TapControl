@@ -5,8 +5,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.hardware.Sensor
@@ -18,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import android.os.SystemClock
 import android.os.VibrationEffect
@@ -26,6 +29,7 @@ import android.os.VibratorManager
 import android.view.KeyEvent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import androidx.core.content.ContextCompat
 
 class TapService : Service(), SensorEventListener {
 
@@ -45,10 +49,15 @@ class TapService : Service(), SensorEventListener {
 
     private lateinit var sensorManager: SensorManager
     private lateinit var audioManager: AudioManager
+    private lateinit var powerManager: PowerManager
     private lateinit var prefs: SharedPreferences
-    private var sensorThread: HandlerThread? = null
+    private lateinit var sensorThread: HandlerThread
+    private lateinit var sensorHandler: Handler
     private var wakeLock: PowerManager.WakeLock? = null
-    private val mainHandler = Handler(android.os.Looper.getMainLooper())
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    private var started = false
+    private var sensing = false
 
     private val detector = TapDetector(
         onTap = { strength -> TapState.lastTapStrength.value = strength },
@@ -56,10 +65,22 @@ class TapService : Service(), SensorEventListener {
     )
 
     private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
-        if (key == TapState.KEY_THRESHOLD) {
-            detector.threshold = p.getFloat(key, TapDetector.DEFAULT_THRESHOLD)
+        when (key) {
+            TapState.KEY_THRESHOLD ->
+                detector.threshold = p.getFloat(key, TapDetector.DEFAULT_THRESHOLD)
+            TapState.KEY_SCREEN_OFF_ONLY -> updateSensing()
         }
     }
+
+    /** Reagiert auf Display an/aus. */
+    private val screenReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) = updateSensing()
+    }
+
+    private val screenOffOnly get() = prefs.getBoolean(TapState.KEY_SCREEN_OFF_ONLY, true)
+
+    /** Soll der Sensor gerade laufen? */
+    private fun shouldSense() = !screenOffOnly || !powerManager.isInteractive
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -67,9 +88,13 @@ class TapService : Service(), SensorEventListener {
         super.onCreate()
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
+        powerManager = getSystemService(POWER_SERVICE) as PowerManager
         prefs = TapState.prefs(this)
         detector.threshold = prefs.getFloat(TapState.KEY_THRESHOLD, TapDetector.DEFAULT_THRESHOLD)
         prefs.registerOnSharedPreferenceChangeListener(prefListener)
+
+        sensorThread = HandlerThread("tap-sensor").also { it.start() }
+        sensorHandler = Handler(sensorThread.looper)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -86,24 +111,39 @@ class TapService : Service(), SensorEventListener {
             if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0,
         )
 
-        if (sensorThread == null) startSensing()
+        if (!started) {
+            started = true
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_SCREEN_OFF)
+                addAction(Intent.ACTION_SCREEN_ON)
+            }
+            ContextCompat.registerReceiver(this, screenReceiver, filter, ContextCompat.RECEIVER_NOT_EXPORTED)
+            updateSensing()
+        }
         TapState.running.value = true
         return START_STICKY
     }
 
-    private fun startSensing() {
-        // Ohne Wake-Lock liefern viele Handys bei ausgeschaltetem Bildschirm keine Sensordaten.
-        wakeLock = (getSystemService(POWER_SERVICE) as PowerManager)
-            .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TapControl::sensor")
-            .apply { acquire() }
-
-        val thread = HandlerThread("tap-sensor").also { it.start() }
-        sensorThread = thread
-        val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        detector.reset()
-        sensorManager.registerListener(
-            this, accel, SensorManager.SENSOR_DELAY_FASTEST, Handler(thread.looper)
-        )
+    /** Schaltet Sensor und Wake-Lock passend zum Display-Zustand ein oder aus. */
+    private fun updateSensing() {
+        val want = started && shouldSense()
+        if (want && !sensing) {
+            sensing = true
+            // Ohne Wake-Lock liefern viele Handys bei ausgeschaltetem Bildschirm keine Sensordaten.
+            wakeLock = powerManager
+                .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "TapControl::sensor")
+                .apply { acquire() }
+            sensorHandler.post { detector.reset() }
+            val accel = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            sensorManager.registerListener(this, accel, SensorManager.SENSOR_DELAY_FASTEST, sensorHandler)
+        } else if (!want && sensing) {
+            sensing = false
+            sensorManager.unregisterListener(this)
+            // angefangene Klopf-Folge verwerfen (z. B. Display ging beim Hochnehmen an)
+            sensorHandler.post { detector.reset() }
+            wakeLock?.takeIf { it.isHeld }?.release()
+            wakeLock = null
+        }
     }
 
     override fun onSensorChanged(event: SensorEvent) {
@@ -113,6 +153,9 @@ class TapService : Service(), SensorEventListener {
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
     private fun handleGesture(count: Int) {
+        // Display ist inzwischen angegangen -> Geste nicht ausführen
+        if (!sensing || !shouldSense()) return
+
         val (keyCode, label) = when (count) {
             1 -> KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE to "1× – Play/Pause"
             2 -> KeyEvent.KEYCODE_MEDIA_NEXT to "2× – Nächster Titel"
@@ -169,10 +212,10 @@ class TapService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
-        sensorManager.unregisterListener(this)
-        sensorThread?.quitSafely()
-        sensorThread = null
-        wakeLock?.takeIf { it.isHeld }?.release()
+        if (started) unregisterReceiver(screenReceiver)
+        started = false
+        updateSensing() // schaltet Sensor und Wake-Lock ab
+        sensorThread.quitSafely()
         prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
         TapState.running.value = false
         super.onDestroy()

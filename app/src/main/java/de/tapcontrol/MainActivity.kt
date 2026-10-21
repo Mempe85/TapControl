@@ -62,6 +62,7 @@ private fun Screen() {
         mutableFloatStateOf(prefs.getFloat(TapState.KEY_THRESHOLD, TapDetector.DEFAULT_THRESHOLD))
     }
     var vibrate by remember { mutableStateOf(prefs.getBoolean(TapState.KEY_VIBRATE, true)) }
+    var screenOffOnly by remember { mutableStateOf(prefs.getBoolean(TapState.KEY_SCREEN_OFF_ONLY, true)) }
 
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -116,6 +117,19 @@ private fun Screen() {
                         prefs.edit().putBoolean(TapState.KEY_VIBRATE, it).apply()
                     })
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Nur bei ausgeschaltetem Display")
+                        Text(
+                            "Zum Testen und Einstellen der Schwelle ausschalten.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(checked = screenOffOnly, onCheckedChange = {
+                        screenOffOnly = it
+                        prefs.edit().putBoolean(TapState.KEY_SCREEN_OFF_ONLY, it).apply()
+                    })
+                }
             }
         }
 
@@ -133,8 +147,8 @@ private fun Screen() {
 
         Spacer(Modifier.weight(1f))
         Text(
-            "Tipp: Leg das Handy hin und klopf ein paar Mal, um die Stärke abzulesen. " +
-                "Stell die Schwelle dann knapp unter diesen Wert.",
+            "Tipp: Schalte „Nur bei ausgeschaltetem Display“ kurz aus, leg das Handy hin und klopf " +
+                "ein paar Mal, um die Stärke abzulesen. Stell die Schwelle dann knapp unter diesen Wert.",
             style = MaterialTheme.typography.bodySmall,
         )
     }
